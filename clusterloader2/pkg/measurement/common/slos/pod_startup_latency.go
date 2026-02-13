@@ -366,6 +366,12 @@ func (p *podStartupLatencyMeasurement) processEvent(event *eventData) {
 	key := createMetaNamespaceKey(pod.Namespace, pod.Name)
 	p.podMetadata.SetStateless(key, isPodStateless(pod))
 
+	if pod.Spec.NodeName != "" {
+		if _, found := p.podStartupEntries.Get(key, schedulePhase); !found {
+			p.podStartupEntries.Set(key, schedulePhase, recvTime)
+		}
+	}
+
 	if pod.Status.Phase == corev1.PodRunning {
 		if _, found := p.podStartupEntries.Get(key, createPhase); !found {
 			p.podStartupEntries.Set(key, watchPhase, recvTime)

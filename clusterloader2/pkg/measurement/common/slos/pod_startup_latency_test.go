@@ -177,3 +177,83 @@ func TestGatherScheduleTimes(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessEvent(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	testCases := []struct {
+		name              string
+		pod               *corev1.Pod
+		wantCreateTime   time.Time
+		wantScheduleTime time.Time
+		wantRunTime      time.Time
+	}{
+		{
+			name: "scheduled and running pod",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "pod1",
+					Namespace:         "default",
+					CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Second)),
+				},
+				Spec: corev1.PodSpec{
+					NodeName: "node1",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							State: corev1.ContainerState{
+								Running: &corev1.ContainerStateRunning{
+									StartedAt: metav1.NewTime(now.Add(-5 * time.Second)),
+								},
+							},
+						},
+					},
+				},
+			},
+			wantCreateTime:   now.Add(-10 * time.Second),
+			wantScheduleTime: now, // Should be recvTime
+			wantRunTime:      now.Add(-5 * time.Second),
+		},
+		{
+			name: "scheduled but not yet running pod",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod2",
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					NodeName: "node1",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+				},
+			},
+			wantScheduleTime: now, // Should be recvTime
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := createPodStartupLatencyMeasurement().(*podStartupLatencyMeasurement)
+			p.processEvent(&eventData{obj: tc.pod, recvTime: now})
+
+			key := "default/" + tc.pod.Name
+			if !tc.wantCreateTime.IsZero() {
+				if got, _ := p.podStartupEntries.Get(key, createPhase); !got.Equal(tc.wantCreateTime) {
+					t.Errorf("create time = %v, want %v", got, tc.wantCreateTime)
+				}
+			}
+			if !tc.wantScheduleTime.IsZero() {
+				if got, _ := p.podStartupEntries.Get(key, schedulePhase); !got.Equal(tc.wantScheduleTime) {
+					t.Errorf("schedule time = %v, want %v", got, tc.wantScheduleTime)
+				}
+			}
+			if !tc.wantRunTime.IsZero() {
+				if got, _ := p.podStartupEntries.Get(key, runPhase); !got.Equal(tc.wantRunTime) {
+					t.Errorf("run time = %v, want %v", got, tc.wantRunTime)
+				}
+			}
+		})
+	}
+}
