@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+echo "Running default kops scalability pre-test script..."
+source "${GOPATH}/src/k8s.io/kops/tests/e2e/scenarios/scalability/pre-test.sh"
+
 MANIFEST_SRC="${AGENT_SANDBOX_MANIFEST_PATH:-https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/manifest.yaml}"
 EXTENSIONS_SRC="${AGENT_SANDBOX_EXTENSIONS_PATH:-https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/extensions.yaml}"
 
@@ -23,6 +26,7 @@ echo "Installing agentic sandbox extensions from ${EXTENSIONS_SRC}"
 kubectl apply -f "${EXTENSIONS_SRC}"
 
 echo "Patching agent-sandbox-controller deployment with performance overrides"
+if [[ "${USE_GKE_CONTROLLER_POOL:-false}" == "true" ]]; then
 kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type=strategic --patch '
 spec:
   template:
@@ -53,6 +57,32 @@ spec:
             memory: "12Gi"
             cpu: "12"
 '
+else
+kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type=strategic --patch '
+spec:
+  template:
+    spec:
+      containers:
+      - name: agent-sandbox-controller
+        args:
+        - --leader-elect=true
+        - --extensions
+        - --enable-pprof-debug
+        - --zap-log-level=debug
+        - --zap-encoder=json
+        - --kube-api-qps=1000
+        - --kube-api-burst=2000
+        - --sandbox-concurrent-workers=1000
+        - --sandbox-claim-concurrent-workers=1000
+        - --sandbox-warm-pool-concurrent-workers=1000
+        - --sandbox-template-concurrent-workers=1000
+        - --sandbox-warm-pool-max-batch-size=1000
+        resources:
+          requests:
+            memory: "12Gi"
+            cpu: "12"
+'
+fi
 
 echo "Verifying patched deployment:"
 kubectl get deployment agent-sandbox-controller -n agent-sandbox-system -o yaml
@@ -60,26 +90,28 @@ kubectl get deployment agent-sandbox-controller -n agent-sandbox-system -o yaml
 echo "Waiting for agent sandbox controller to be ready"
 kubectl wait --for=condition=Ready pod -l app=agent-sandbox-controller -n agent-sandbox-system --timeout=5m || echo "WARNING: Timeout waiting for agent sandbox controller"
 
-echo "Applying Cilium exclusion for Sandbox unique labels"
-kubectl patch cm -n kube-system cilium-config-emergency-override --patch '
-data:
-  labels: "!agents.x-k8s.io/sandbox-name-hash !agents.x-k8s.io/claim-uid !agents.x-k8s.io/warm-pool-sandbox !agents.x-k8s.io/sandbox-pod-template-hash"
-'
+if [[ "${IS_GKE:-false}" == "true" ]]; then
+  echo "Applying Cilium exclusion for Sandbox unique labels"
+  kubectl patch cm -n kube-system cilium-config-emergency-override --patch '
+  data:
+    labels: "!agents.x-k8s.io/sandbox-name-hash !agents.x-k8s.io/claim-uid !agents.x-k8s.io/warm-pool-sandbox !agents.x-k8s.io/sandbox-pod-template-hash"
+  ' || true
 
-kubectl get cm -n kube-system cilium-config-emergency-override -oyaml
+  kubectl get cm -n kube-system cilium-config-emergency-override -oyaml || true
 
-echo "Restart KCP"
-cluster_location=${REGION:-${ZONE}}
-gcloud container clusters upgrade "${CLUSTER_NAME}" \
-    --location "${cluster_location}" \
-    --project "${PROJECT}" \
-    --cluster-version "$(gcloud container clusters describe "${CLUSTER_NAME}" --location "${cluster_location}" --project "${PROJECT}" --format="value(currentMasterVersion)")" \
-    --master --quiet
+  echo "Restart KCP"
+  cluster_location=${REGION:-${ZONE}}
+  gcloud container clusters upgrade "${CLUSTER_NAME}" \
+      --location "${cluster_location}" \
+      --project "${PROJECT}" \
+      --cluster-version "$(gcloud container clusters describe "${CLUSTER_NAME}" --location "${cluster_location}" --project "${PROJECT}" --format="value(currentMasterVersion)")" \
+      --master --quiet
 
-kubectl delete pods -l k8s-app=cilium -n kube-system
+  kubectl delete pods -l k8s-app=cilium -n kube-system
 
-echo "Done. Kubernetes will now recreate the anetd pods."
-sleep 300
+  echo "Done. Kubernetes will now recreate the anetd pods."
+  sleep 300
+fi
 
 
 echo "Installing agent-sandbox pprof scraper config"
